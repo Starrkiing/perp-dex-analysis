@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 from .common import (fetch_json, archive_raw, append, exclude_incomplete_day, null_obs, utc_now, iso)
 from .venues import VENUES, SNAPSHOT_METRICS, UNITS, PERIOD, Ctx, MalformedPayload
 from .history import LLAMA, SERIES, llama_url, parse_llama_series, not_reported_series
-from .tokens import TOKENS, cg_url, parse_coingecko
+from .tokens import TOKENS, FIELDS, cg_url, parse_coingecko
 from .annotations import turnover_indicator, incentive_annotations
 
 
@@ -32,7 +32,7 @@ def collect_venue(v, now: datetime, raw_dir, **fkw):
     sha = archive_raw(r, raw_dir) if raw_dir else r.sha256
     try:
         return v.parser(payload, Ctx(v.name, v.url, r.fetched_at, date_utc, sha, r.status)), log
-    except (MalformedPayload, KeyError, TypeError, AttributeError) as e:
+    except (MalformedPayload, ValueError, KeyError, TypeError, AttributeError) as e:
         log["error"] = f"malformed payload: {e}"
         return fail_all(v, r, date_utc, f"malformed payload: {e}"), log
 
@@ -56,13 +56,18 @@ def collect_history(now, raw_dir, history_days=30, **fkw):
                     st, why = "not_reported", "DefiLlama now gates this endpoint behind a paid plan (HTTP 402); paid services not authorized"
                 else:
                     st, why = "fetch_failed", f"DefiLlama: {err}"
-                obs.append(not_reported_series(venue, metric, url, r.fetched_at, now.date().isoformat(), st, why, r.status))
+                # On a failed/nonexistent historical endpoint, retain a coverage
+                # observation against the most recent COMPLETED UTC day. Using
+                # today's date makes exclude_incomplete_day silently delete it.
+                last_complete = (now.date() - timedelta(days=1)).isoformat()
+                obs.append(not_reported_series(venue, metric, url, r.fetched_at, last_complete, st, why, r.status))
                 continue
             sha = archive_raw(r, raw_dir) if raw_dir else r.sha256
             try:
                 obs += parse_llama_series(payload, venue, metric, url, r.fetched_at, now, sha, r.status)
             except ValueError as e:
-                obs.append(not_reported_series(venue, metric, url, r.fetched_at, now.date().isoformat(),
+                last_complete = (now.date() - timedelta(days=1)).isoformat()
+                obs.append(not_reported_series(venue, metric, url, r.fetched_at, last_complete,
                                                "fetch_failed", f"malformed payload: {e}", r.status))
     obs = exclude_incomplete_day(obs, now)
     if history_days:
@@ -75,10 +80,22 @@ def collect_tokens(now, raw_dir, **fkw):
     url = cg_url([c for c in TOKENS.values() if c])
     r, payload, err = fetch_json(url, **fkw)
     log = {"venue": "coingecko", "url": url, "http_status": r.status, "error": err}
-    if payload is None:
-        return [], log
-    sha = archive_raw(r, raw_dir) if raw_dir else r.sha256
-    return parse_coingecko(payload, url, r.fetched_at, now.date().isoformat(), sha, r.status), log
+    sha = archive_raw(r, raw_dir) if (raw_dir and payload is not None) else r.sha256
+    if payload is not None:
+        try:
+            return parse_coingecko(payload, url, r.fetched_at, now.date().isoformat(), sha, r.status), log
+        except (ValueError, KeyError, TypeError) as exc:
+            err = f"malformed CoinGecko payload: {exc}"
+            log["error"] = err
+    # Failed token-source refresh is an explicit failure, not a reason to
+    # silently lose token coverage for this snapshot.
+    missing = [
+        null_obs(venue, metric, unit, "point_in_time", url, r.fetched_at,
+                 now.date().isoformat(), "fetch_failed", str(err or "token source unavailable"),
+                 kind="token_market_api", http_status=r.status, raw_sha=sha)
+        for venue in TOKENS for metric, (_field, unit) in FIELDS.items()
+    ]
+    return missing, log
 
 
 def main(argv=None):
