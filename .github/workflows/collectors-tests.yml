@@ -1,0 +1,30 @@
+name: collectors-offline-tests
+on:
+  push:
+    paths: ["collectors/**", "tests/collector_tests/**", ".github/workflows/collectors-tests.yml"]
+  pull_request:
+    paths: ["collectors/**", "tests/collector_tests/**", ".github/workflows/collectors-tests.yml"]
+permissions:
+  contents: read
+jobs:
+  offline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install pytest
+      # Collectors use only the standard library. Tests block sockets; no live fetch ever runs in CI.
+      - run: python -m pytest -q tests/collector_tests
+      - name: Validate committed observations against the contract
+        run: |
+          python - <<'PY'
+          import json
+          from collectors.common import Observation
+          n = 0
+          for line in open("data/observations/observations.jsonl"):
+              Observation(**json.loads(line)).validate(); n += 1
+          print(f"{n} committed rows valid")
+          PY
