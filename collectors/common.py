@@ -9,6 +9,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import math
 import os
 import time
 import urllib.error
@@ -75,6 +76,14 @@ class Observation:
             if not self.null_reason:
                 raise ValueError(f"{self.metric}: null value requires null_reason")
         else:
+            if isinstance(self.value, bool) or not isinstance(self.value, (int, float)):
+                raise ValueError(f"{self.metric}: numeric value required")
+            if not math.isfinite(self.value):
+                raise ValueError(f"{self.metric}: non-finite values are invalid")
+            # Net protocol revenue can legitimately be negative, but stock,
+            # volume, fees and OI measures cannot.
+            if self.value < 0 and self.metric not in ("revenue_usd", "holders_revenue_usd"):
+                raise ValueError(f"{self.metric}: negative value invalid")
             if self.coverage_status in ("not_reported", "fetch_failed", "not_implemented"):
                 raise ValueError(f"{self.metric}: value present with null status")
             if self.value == 0 and self.coverage_status not in ("zero", "zero_suspected_gap"):
@@ -251,14 +260,21 @@ def _existing_keys(jsonl_path):
 
 
 def _hist_key(d: dict):
-    # completed-day history is immutable once written: one row per (date, venue, metric, instrument, source).
+    # Keep old observed *vintages* immutable, not the metric forever.
+    # A provider revision or a later successful fetch after a null/failure
+    # must append a new dated record. Re-fetches with unchanged values/status
+    # do not add a duplicate. Analysts select latest fetched_at per metric/date.
+    # Keep raw hash out of this key: source chart bodies can change while
+    # the historic value for this specific date remains identical.
+    base = (d["date_utc"], d["venue"], d["metric"], d.get("instrument") or "",
+            d.get("market_id") or "", d["source_uri"])
     if d["period"] == "completed_utc_day":
-        return ("H", d["date_utc"], d["venue"], d["metric"], d.get("instrument") or "", d["source_uri"])
-    return ("S", d["date_utc"], d["venue"], d["metric"], d.get("instrument") or "", d["source_uri"], d["fetched_at_utc"])
+        return ("H",) + base + (d.get("value"), d["coverage_status"], d.get("null_reason"))
+    return ("S",) + base + (d["fetched_at_utc"],)
 
 
 def append(obs: list, out_dir: str, stem: str = "observations") -> int:
-    """Append-only: never rewrites existing lines; skips rows already present."""
+    """Append-only: never rewrites existing lines; historic revisions become new vintages."""
     os.makedirs(out_dir, exist_ok=True)
     jp, cp = os.path.join(out_dir, f"{stem}.jsonl"), os.path.join(out_dir, f"{stem}.csv")
     keys = _existing_keys(jp)
