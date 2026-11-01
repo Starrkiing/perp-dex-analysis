@@ -50,8 +50,11 @@ def _emit(ctx: Ctx, values: dict, reasons: dict, status_override: dict | None = 
 
 
 def _sum(vals):
-    vals = [v for v in vals if v is not None]
-    return sum(vals) if vals else None
+    # Do not publish a partial set of markets as an exchange-wide total.
+    # Missing a single active constituent invalidates the aggregate.
+    if not vals or any(v is None for v in vals):
+        return None
+    return sum(vals)
 
 
 # --------------------------------------------------------------------------- parsers
@@ -87,7 +90,9 @@ def parse_extended(p, ctx):
         vol.append(to_float(s.get("dailyVolume")))
         oi.append(to_float(s.get("openInterest")))
     return _emit(ctx, {VOL: _sum(vol), OI: _sum(oi), NMKT: len(seen)},
-                 {TVL: "not_implemented: vault/collateral TVL not in /info/markets"})
+                 {TVL: "not_implemented: vault/collateral TVL not in /info/markets",
+                  OI: "the openInterest field's USD unit and one-side/both-side definition are unverified"},
+                 {OI: "unit_unverified"})
 
 
 def parse_lighter(p, ctx):
