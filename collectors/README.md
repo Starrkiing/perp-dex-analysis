@@ -4,7 +4,7 @@ Owner: Grok (engineering), per [perp-dex-analysis #2](https://github.com/Starrki
 Scope: ingestion and provenance only. No modelling, no `research/`, `compute.py` or `relative_value.py` changes.
 
 ## Contract
-Output files: `data/observations/observations.jsonl` and `observations.csv`. Both are append-only: existing lines are never rewritten, and completed UTC days are immutable once written.
+Output files: `data/observations/observations.jsonl` and `observations.csv`. Both are append-only: existing lines are never rewritten. Completed UTC-day **observations** are immutable, but revised or recovered values for an existing date are appended as a new *vintage* with a later `fetched_at_utc` (same values/status are deduplicated). Consumers must select a clearly specified as-of vintage; first-seen is not always final.
 
 Contract columns (exact order):
 `date_utc,venue,metric,value,unit,period,source_uri,fetched_at_utc,coverage_status,schema_version`
@@ -14,6 +14,7 @@ Provenance extras: `null_reason,instrument,market_id,raw_sha256,http_status,obse
 - **period**: `point_in_time` (snapshot at `fetched_at_utc`), `rolling_24h` (venue's trailing 24h at fetch time, not a UTC day), `completed_utc_day` (closed UTC days only; the current, incomplete UTC day is always dropped).
 - **coverage_status**: `observed`; `zero` (source explicitly reported 0); `zero_suspected_gap` (source reported 0 but a documented coverage break makes it unreliable); `not_reported` (source does not publish it); `fetch_failed` (HTTP error, non-JSON or malformed payload); `not_implemented` (a source probably exists but v1 does not collect it); `unit_unverified` (value present, units not confirmed in public docs). Every null carries a `null_reason`; nulls are never written as 0.
 - **observed_kind**: `venue_api` (first-party), `aggregator_api` (DefiLlama JSON API), `token_market_api` (CoinGecko), `derived` (ratio of other rows), `annotation` (cited incentive program).
+- **Completeness**: missing any active constituent invalidates that venue's corresponding aggregate rather than silently reporting a partial total. An absent historical endpoint yields a coverage record on the last *completed* UTC date, not a discarded current-day row. Failed CoinGecko fetches yield explicit `fetch_failed` token rows.
 - **Raw responses**: content-addressed by sha256 in `data/observations/raw/<sha>.json`. The index (`raw/index.jsonl`: URL, status, attempts, time) is committed; the bodies (~4 MB per run) are kept locally and not committed in v1. Requests send no credentials, so bodies contain no secrets.
 - **HTTP**: standard library only. Bounded retries (3 attempts), exponential backoff 1 s, 2 s (cap 8 s), only on 429/5xx/network errors; 4xx is not retried. DefiLlama calls are spaced 0.3 s apart.
 
@@ -64,8 +65,15 @@ Token unlock schedules: `not_implemented` (no free documented API found).
 
 To reproduce: GET each URL, take the `totalDataChart` point with timestamp `1792540800` (2026-10-21T00:00Z), and compare against the committed row. Extended's 2026-10-21 fees are about 1.96% of Hyperliquid's. DefiLlama can revise past values, so the committed rows preserve what was observed at `fetched_at_utc`.
 
-Snapshot on the same run (rolling 24h, not a UTC day): Hyperliquid volume $2.039B, OI $10.62B; Extended volume $175.2M, OI $186.7M. Extended's OI is the sum of the venue's `openInterest` field and is about twice DefiLlama's earlier ~$95M figure, so the field's definition (one side or both, units) needs confirming with Extended. That discrepancy is unresolved.
+Snapshot on the same run (rolling 24h, not a UTC day): Hyperliquid volume $2.039B, OI $10.62B; Extended volume $175.2M, *raw reported openInterest aggregate* $186.7M **with USD units UNVERIFIED**. It is about twice DefiLlama's earlier ~$95M figure, so the field's one-sided/both-sided and unit definition needs confirming. **IMPORTANT: the initial committed 2026-11-01 smoke observation predates Captain's audit and labeled this Extended OI field `observed`; do not treat that status as USD-comparable. New fetches label it `unit_unverified`. Filter or override the legacy record before comparison.**
 
 ## Wash and incentive indicators
 - `wash_risk_turnover_24h` = 24h volume / current OI. A review flag, not proof.
 - Incentive annotations are limited to cited documents (currently: Extended points, per its migration doc). No annotation does **not** mean no incentives.
+
+## Independent Captain audit addendum (2026-11-01)
+- Confirmed that partial per-market data must not be summed into a falsely complete exchange-wide number; validators now reject non-finite values and negative size metrics.
+- Fixed historical-vintage handling: first observations are retained, revisions append new dated values, and unchanged values are deduplicated. Consumers must select the latest *available as-of* observation, not blindly aggregate all revisions.
+- Resolved missing historical/spot-data coverage and the research-versus-pytest discovery collision; the pipelines have separate CI checks.
+- The committed raw-response **index** and hashes are auditable metadata, but raw response bodies were not committed. A later GET may differ due to provider revisions and is not a bit-identical reproduction of the Nov 1 collection.
+- **Still not delivered:** verified average historical OI, complete consolidated Extended Arc revenue/fees, several venue market endpoints, token unlock data, or a forward-tested XTEN edge. Collector outputs remain exploratory.
